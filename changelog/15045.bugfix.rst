@@ -1,0 +1,2 @@
+The :option:`--last-failed` and :option:`--new-first` caches now preserve
+custom item names containing square brackets.

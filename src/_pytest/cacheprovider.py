@@ -56,6 +56,39 @@ Signature: 8a477f597d28d172789f06886806bc55
 }
 
 
+_NODEID_CACHE_PREFIX = "@pytest-nodeid:"
+
+
+def _nodeid_to_cache_key(nodeid: NodeId) -> str:
+    """Return a cache key which preserves custom node names verbatim.
+
+    The traditional string form is ambiguous when a custom collector uses a
+    ``[`` in an item name: the parser cannot distinguish that from the
+    parameter suffix of a parametrized test. Keep the established string
+    format for unambiguous node IDs and use a structured fallback only when
+    round-tripping would lose information.
+    """
+    key = str(nodeid)
+    if NodeId.parse(key) == nodeid:
+        return key
+    payload = json.dumps(
+        [nodeid.path, nodeid.names, nodeid.params], separators=(",", ":")
+    )
+    return _NODEID_CACHE_PREFIX + payload
+
+
+def _nodeid_from_cache_key(key: str) -> NodeId:
+    if not key.startswith(_NODEID_CACHE_PREFIX):
+        return NodeId.parse(key)
+
+    try:
+        path, names, params = json.loads(key[len(_NODEID_CACHE_PREFIX) :])
+    except (TypeError, ValueError):
+        # Treat manually edited or corrupt keys as legacy node IDs.
+        return NodeId.parse(key)
+    return NodeId(path=path, names=tuple(names), params=params)
+
+
 def _make_cachedir(target: Path) -> None:
     """Create the pytest cache directory atomically with supporting files.
 
@@ -330,7 +363,7 @@ class LFPlugin:
         self.active = any(config.getoption(key) for key in active_keys)
         assert config.cache
         self.lastfailed: dict[NodeId, bool] = {
-            NodeId.parse(k): v
+            _nodeid_from_cache_key(k): v
             for k, v in config.cache.get("cache/lastfailed", {}).items()
         }
         self._previously_failed_count: int | None = None
@@ -433,7 +466,9 @@ class LFPlugin:
             return
 
         assert config.cache is not None
-        current_lastfailed = {str(k): v for k, v in self.lastfailed.items()}
+        current_lastfailed = {
+            _nodeid_to_cache_key(k): v for k, v in self.lastfailed.items()
+        }
         saved_lastfailed = config.cache.get("cache/lastfailed", {})
         if saved_lastfailed != current_lastfailed:
             config.cache.set("cache/lastfailed", current_lastfailed)
@@ -447,7 +482,7 @@ class NFPlugin:
         self.active = config.option.newfirst
         assert config.cache is not None
         self.cached_nodeids: set[NodeId] = {
-            NodeId.parse(s) for s in config.cache.get("cache/nodeids", [])
+            _nodeid_from_cache_key(s) for s in config.cache.get("cache/nodeids", [])
         }
 
     @hookimpl(wrapper=True, tryfirst=True)
@@ -484,7 +519,10 @@ class NFPlugin:
             return
 
         assert config.cache is not None
-        config.cache.set("cache/nodeids", sorted(str(n) for n in self.cached_nodeids))
+        config.cache.set(
+            "cache/nodeids",
+            sorted(_nodeid_to_cache_key(n) for n in self.cached_nodeids),
+        )
 
 
 def pytest_addoption(parser: Parser) -> None:

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from enum import auto
 from enum import Enum
 import errno
+import json
 import os
 from pathlib import Path
 import shutil
@@ -705,6 +706,46 @@ class TestLastFailed:
         pytester.makepyfile(test_errored="def test_error():\n    assert False")
         pytester.runpytest("-q", "--lf")
         assert os.path.exists(".pytest_cache/v/cache/lastfailed")
+
+    def test_lastfailed_custom_item_names_with_brackets(
+        self, pytester: Pytester
+    ) -> None:
+        pytester.makeconftest(
+            """
+            import json
+            import pytest
+
+            def pytest_collect_file(parent, file_path):
+                if file_path.name == "test_cases.json":
+                    return Cases.from_parent(parent, path=file_path)
+
+            class Cases(pytest.File):
+                def collect(self):
+                    for name, passed in json.loads(self.path.read_text()).items():
+                        yield Case.from_parent(self, name=name, passed=passed)
+
+            class Case(pytest.Item):
+                def __init__(self, *, passed, **kwargs):
+                    super().__init__(**kwargs)
+                    self.passed = passed
+
+                def runtest(self):
+                    assert self.passed
+            """
+        )
+        cases = pytester.path / "test_cases.json"
+        cases.write_text(
+            json.dumps({"a_bad[one]": False, "b_fixed": False}), encoding="utf-8"
+        )
+        result = pytester.runpytest("--tb=no")
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+
+        cases.write_text(
+            json.dumps({"a_bad[one]": False, "b_fixed": True}), encoding="utf-8"
+        )
+        result = pytester.runpytest("--lf", "--tb=no")
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+        assert "FAILED test_cases.json::a_bad[one]" in result.stdout.str()
 
     def test_xfail_not_considered_failure(self, pytester: Pytester) -> None:
         pytester.makepyfile(
